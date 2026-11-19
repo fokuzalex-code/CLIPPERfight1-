@@ -1,0 +1,202 @@
+import hashlib, os, uuid, zipfile
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.requests import Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from modules import config as cfg, pipeline as pl
+
+app = FastAPI(title="Clipper.fight")
+BASE = Path(__file__).parent
+ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
+TOKEN = hashlib.sha256(ACCESS_KEY.encode()).hexdigest() if ACCESS_KEY else ""
+LOGIN = """<meta name=viewport content="width=device-width,initial-scale=1"><body style="background:#000;color:#fff;
+font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><form action=/login style="width:80%;max-width:340px">
+<h2>Clipper.fight 🥊</h2><input name=key type=password placeholder="Clave de acceso" style="width:100%;padding:16px;
+border-radius:14px;border:1px solid #333;background:#111;color:#fff;font-size:18px"><button style="width:100%;margin-top:12px;
+padding:16px;border-radius:14px;border:0;background:#ffe600;font-weight:700;font-size:18px">Entrar</button></form>"""
+
+
+@app.middleware("http")
+async def gate(request: Request, call_next):
+    p = request.url.path
+    if ACCESS_KEY and p not in ("/login", "/health") and request.cookies.get("cf_key") != TOKEN:
+        if p.startswith(("/api", "/media")):
+            return JSONResponse({"detail": "No autorizado"}, 401)
+        return HTMLResponse(LOGIN, 401)
+    return await call_next(request)
+
+
+@app.on_event("startup")
+def startup():
+    cfg.ensure()
+    pl.load_jobs()
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+@app.get("/login")
+def login(key: str = ""):
+    if ACCESS_KEY and key == ACCESS_KEY:
+        r = RedirectResponse("/")
+        r.set_cookie("cf_key", TOKEN, max_age=31536000, httponly=True, samesite="lax")
+        return r
+    return HTMLResponse(LOGIN, 401)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return (BASE / "templates" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/api/settings")
+def get_settings():
+    return cfg.load()
+
+
+@app.post("/api/settings")
+def set_settings(d: dict):
+    return cfg.save(d)
+
+
+@app.post("/api/cleanup")
+def cleanup():
+    if pl.busy():
+        raise HTTPException(409, "Hay trabajos en proceso")
+    cfg.clear_cache()
+    return {"ok": True}
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in (".mp4", ".mkv", ".mov", ".webm"):
+        raise HTTPException(400, "Formato no soportado (usa MP4 o MKV)")
+    fid = uuid.uuid4().hex[:10]
+    d = cfg.UPLOADS / fid
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / ("upload" + ext), "wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    return {"file_id": fid, "name": file.filename}
+
+
+class JobReq(BaseModel):
+    url: Optional[str] = None
+    file_id: Optional[str] = None
+    start_min: int = 0
+    duration: str = "30-60"
+    count: int = 10
+    layout: str = "split"
+    blur: bool = True
+    wm_user: str = ""
+    wm_opacity: float = 0.6
+    wm_pos: str = "br"
+    hook: bool = True
+    fillers: bool = True
+    stinger: bool = False
+    progress_bar: bool = True
+
+
+@app.post("/api/jobs")
+def create_job(r: JobReq):
+    if not r.url and not r.file_id:
+        raise HTTPException(400, "Pega una URL de Kick o sube un archivo")
+    if r.file_id and not (cfg.UPLOADS / Path(r.file_id).name).exists():
+        raise HTTPException(400, "Archivo no encontrado, súbelo de nuevo")
+    if r.duration not in pl.DUR or r.layout not in ("split", "cam", "podcast", "original"):
+        raise HTTPException(400, "Parámetros inválidos")
+    d = r.dict()
+    d["count"] = max(1, min(30, d["count"]))
+    d["file_id"] = Path(d["file_id"]).name if d["file_id"] else None
+    return {"id": pl.new_job(d)["id"]}
+
+
+def _job(jid):
+    j = pl.JOBS.get(jid)
+    if not j:
+        raise HTTPException(404, "Trabajo no encontrado")
+    return j
+
+
+def _clip(j, cid):
+    c = next((c for c in j["clips"] if c["id"] == cid), None)
+    if not c:
+        raise HTTPException(404, "Clip no encontrado")
+    return c
+
+
+@app.get("/api/jobs/{jid}")
+def get_job(jid: str):
+    return pl.public(_job(jid))
+
+
+@app.post("/api/jobs/{jid}/clips/{cid}/reroll")
+def reroll(jid: str, cid: str):
+    _job(jid), _clip(_job(jid), cid)
+    try:
+        pl.reroll(jid, cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{jid}/clips/{cid}/trash")
+def trash(jid: str, cid: str):
+    _clip(_job(jid), cid)
+    pl.trash(jid, cid)
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{jid}/clips/{cid}/edit")
+def edit(jid: str, cid: str, d: dict):
+    _clip(_job(jid), cid)
+    try:
+        pl.edit(jid, cid, d)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.get("/media/{jid}/{name}")
+def media(jid: str, name: str):
+    p = Path(_job(jid)["dir"]) / Path(name).name
+    if not p.exists():
+        raise HTTPException(404)
+    return FileResponse(p)  # Starlette soporta Range (necesario para <video> en iOS)
+
+
+@app.get("/api/jobs/{jid}/clips/{cid}/download")
+def download(jid: str, cid: str):
+    j = _job(jid)
+    c = _clip(j, cid)
+    p = Path(j["dir"]) / (c["file"] or "x")
+    if not p.exists():
+        raise HTTPException(404)
+    return FileResponse(p, media_type="video/mp4", filename=c["name"])
+
+
+@app.get("/api/jobs/{jid}/zip")
+def make_zip(jid: str):
+    j = _job(jid)
+    zp = Path(j["dir"]) / f"Clipper.fight_{jid}.zip"
+    meta = []
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as z:
+        for c in j["clips"]:
+            p = Path(j["dir"]) / (c["file"] or "x")
+            if c["trashed"] or not p.exists():
+                continue
+            z.write(p, f"Clipper.fight/{c['layout']}/{c['name']}")
+            meta.append(f"{c['name']}\n  Título: {c['title']}\n  Score: {c['score']}\n  {c['tags']}\n")
+        z.writestr("Clipper.fight/metadata.txt", "\n".join(meta) or "Sin clips")
+    return FileResponse(zp, media_type="application/zip", filename=zp.name)
+
+
+app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
