@@ -1,207 +1,229 @@
-import hashlib, os, uuid, zipfile
-from pathlib import Path
-from typing import Optional
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+async function api(url, opt = {}) {
+  const r = await fetch(url, {headers: {'Content-Type': 'application/json'}, ...opt});
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch {} throw new Error(m); }
+  return r.json();
+}
+const post = (u, b) => api(u, {method: 'POST', body: JSON.stringify(b || {})});
+function toast(t) { $('#toastTxt').textContent = t; const e = $('#toast'); e.style.opacity = 1; setTimeout(() => e.style.opacity = 0, 2200); }
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.requests import Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+let S = {}, st = {src: 'url', dur: '30-60', layout: 'split', count: 10, fileId: null, job: null, timer: null};
 
-from modules import config as cfg, pipeline as pl
+/* ---------- Bottom sheet ---------- */
+function openSheet(html, mount) {
+  $('#sheetBody').innerHTML = html; $('#ov').classList.remove('hidden');
+  requestAnimationFrame(() => $('#sheet').classList.remove('translate-y-full'));
+  mount && mount();
+}
+function closeSheet() {
+  $('#sheet').classList.add('translate-y-full'); $('#ov').classList.add('hidden');
+  $$('#sheetBody video').forEach(v => v.pause());
+}
+$('#ov').onclick = closeSheet;
 
-app = FastAPI(title="Clipper.fight")
-BASE = Path(__file__).parent
-(BASE / "static").mkdir(exist_ok=True)
-(BASE / "templates").mkdir(exist_ok=True)
-ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
-TOKEN = hashlib.sha256(ACCESS_KEY.encode()).hexdigest() if ACCESS_KEY else ""
-LOGIN = """<meta name=viewport content="width=device-width,initial-scale=1"><body style="background:#000;color:#fff;
-font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><form action=/login style="width:80%;max-width:340px">
-<h2>Clipper.fight 🥊</h2><input name=key type=password placeholder="Clave de acceso" style="width:100%;padding:16px;
-border-radius:14px;border:1px solid #333;background:#111;color:#fff;font-size:18px"><button style="width:100%;margin-top:12px;
-padding:16px;border-radius:14px;border:0;background:#ffe600;font-weight:700;font-size:18px">Entrar</button></form>"""
+/* ---------- Ajustes ---------- */
+const SCHEMA = [
+  ['#', '📂 Archivos'], ['out_dir', 'Carpeta de salida', 'text'], ['max_source_minutes', 'Máx. minutos a descargar del stream', 'number'],
+  ['#', '🧠 IA'], ['whisper_model', 'Modelo Faster-Whisper', 'select', [['tiny', 'tiny (rápido)'], ['base', 'base (recomendado)'], ['small', 'small (preciso, lento)']]],
+  ['language', 'Idioma del audio', 'select', [['auto', 'Automático'], ['es', 'Español'], ['en', 'Inglés']]],
+  ['sensitivity', 'Sensibilidad IA (exigencia de viralidad)', 'range', [0, 100, 5]],
+  ['#', '💬 Subtítulos (estilo Hormozi)'],
+  ['sub_font', 'Tipografía', 'select', [['Montserrat', 'Montserrat'], ['DejaVu Sans', 'DejaVu Sans'], ['Liberation Sans', 'Liberation Sans']]],
+  ['sub_color', 'Color del texto', 'color'], ['sub_active', 'Color palabra activa', 'color'],
+  ['sub_position', 'Posición', 'select', [['bottom', 'Abajo'], ['center', 'Centro'], ['top', 'Arriba']]],
+  ['sub_size', 'Tamaño', 'range', [50, 120, 2]],
+  ['#', '🏷️ Marca de agua'], ['wm_user', 'Usuario de Kick', 'text'], ['wm_opacity', 'Opacidad', 'range', [0.1, 1, 0.05]],
+  ['wm_pos', 'Esquina', 'select', [['tl', 'Arriba izquierda'], ['tr', 'Arriba derecha'], ['bl', 'Abajo izquierda'], ['br', 'Abajo derecha']]],
+  ['#', '🎬 Predeterminados'],
+  ['default_duration', 'Duración favorita', 'select', [['15-30', '15-30 s'], ['30-60', '30-60 s'], ['60-90', '60-90 s']]],
+  ['default_layout', 'Layout inicial', 'select', [['split', 'Split Arriba/Abajo'], ['cam', 'Cámara sola']]],
+  ['hashtags', 'Hashtags globales', 'textarea'],
+  ['#', '🔊 Audio'], ['target_lufs', 'Volumen objetivo (LUFS)', 'number'], ['anti_fillers', 'Filtro anti-muletillas', 'check'],
+  ['#', '🎨 Tema'], ['oled', 'Negro OLED puro', 'check'],
+];
+function field([k, l, t, o]) {
+  if (k === '#') return `<div class="mt-8 mb-1 text-yellow-300 font-bold">${l}</div>`;
+  const v = S[k], id = `s_${k}`;
+  let inp;
+  if (t === 'select') inp = `<select id="${id}" class="inp">${o.map(x => `<option value="${x[0]}" ${x[0] == v ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>`;
+  else if (t === 'range') inp = `<input id="${id}" type="range" min="${o[0]}" max="${o[1]}" step="${o[2]}" value="${v}"><div class="text-right text-xs text-zinc-500" id="${id}_v">${v}</div>`;
+  else if (t === 'textarea') inp = `<textarea id="${id}" rows="2" class="inp py-3">${esc(v)}</textarea>`;
+  else if (t === 'check') return `<label class="tgl mt-2">${l}<input id="${id}" type="checkbox" ${v ? 'checked' : ''}></label>`;
+  else if (t === 'color') inp = `<input id="${id}" type="color" value="${v}" class="w-full h-12 rounded-2xl bg-zinc-900 border border-zinc-800">`;
+  else inp = `<input id="${id}" type="${t}" class="inp" value="${esc(v)}">`;
+  return `<label class="lbl">${l}</label>${inp}`;
+}
+function openSettings() {
+  openSheet(`<h2 class="text-xl font-extrabold mb-2">⚙️ Ajustes</h2>${SCHEMA.map(field).join('')}
+    <div class="grid grid-cols-2 gap-3 mt-8"><button id="sClean" class="btn btn-g">🧹 Borrar caché</button><button id="sSave" class="btn btn-y">Guardar</button></div>`, () => {
+    $$('#sheetBody input[type=range]').forEach(r => r.oninput = () => $(`#${r.id}_v`).textContent = r.value);
+    $('#sSave').onclick = async () => {
+      const d = {};
+      SCHEMA.forEach(([k, , t]) => { if (k === '#') return; const e = $(`#s_${k}`);
+        d[k] = t === 'check' ? e.checked : (t === 'range' || t === 'number') ? Number(e.value) : e.value; });
+      S = await post('/api/settings', d); applySettings(true); closeSheet(); toast('Ajustes guardados');
+    };
+    $('#sClean').onclick = async () => { try { await post('/api/cleanup'); toast('Caché borrada'); } catch (e) { toast(e.message); } };
+  });
+}
+function applySettings(force) {
+  document.body.classList.toggle('soft', !S.oled);
+  if (force || !st.init) {
+    st.dur = S.default_duration; st.layout = S.default_layout; st.init = true;
+    $('#wmUser').value = S.wm_user || ''; mark('#gDur', st.dur); mark('#gLay', st.layout);
+  }
+}
+function mark(g, v) { $$(`${g} .chip`).forEach(c => c.classList.toggle('on', c.dataset.v === v)); }
 
+/* ---------- Home ---------- */
+$('#btnSettings').onclick = openSettings;
+$$('[data-src]').forEach(b => b.onclick = () => {
+  st.src = b.dataset.src; $$('[data-src]').forEach(x => x.classList.toggle('on', x === b));
+  $('#srcUrl').classList.toggle('hidden', st.src !== 'url'); $('#srcFile').classList.toggle('hidden', st.src !== 'file');
+});
+$$('#gDur .chip').forEach(c => c.onclick = () => { st.dur = c.dataset.v; mark('#gDur', st.dur); });
+$$('#gLay .chip').forEach(c => c.onclick = () => { st.layout = c.dataset.v; mark('#gLay', st.layout); });
+$('#cMinus').onclick = () => { st.count = Math.max(1, st.count - 1); $('#cnt').textContent = st.count; };
+$('#cPlus').onclick = () => { st.count = Math.min(30, st.count + 1); $('#cnt').textContent = st.count; };
+$('#btnPick').onclick = () => $('#file').click();
+$('#file').onchange = () => {
+  const f = $('#file').files[0]; if (!f) return;
+  st.fileId = null; $('#upInfo').classList.remove('hidden'); $('#upName').textContent = f.name;
+  const x = new XMLHttpRequest(), fd = new FormData(); fd.append('file', f);
+  x.upload.onprogress = e => { if (e.lengthComputable) { const p = Math.round(e.loaded / e.total * 100); $('#upBar').style.width = p + '%'; $('#upPct').textContent = p + '%'; } };
+  x.onload = () => { try { const r = JSON.parse(x.responseText); if (x.status >= 300) throw new Error(r.detail); st.fileId = r.file_id; $('#upPct').textContent = '✅ Listo'; } catch (e) { $('#upPct').textContent = '❌ ' + e.message; } };
+  x.onerror = () => $('#upPct').textContent = '❌ Error de red';
+  x.open('POST', '/api/upload'); x.send(fd);
+};
+$('#btnGo').onclick = async () => {
+  const url = $('#url').value.trim();
+  if (st.src === 'url' && !url) return toast('Pega una URL de Kick');
+  if (st.src === 'file' && !st.fileId) return toast('Sube un archivo primero');
+  try {
+    const r = await post('/api/jobs', {
+      url: st.src === 'url' ? url : null, file_id: st.src === 'file' ? st.fileId : null,
+      start_min: Number($('#startMin').value) || 0, duration: st.dur, layout: st.layout, count: st.count,
+      blur: $('#oBlur').checked, hook: $('#oHook').checked, fillers: $('#oFill').checked,
+      progress_bar: $('#oBar').checked, stinger: $('#oSting').checked,
+      wm_user: $('#wmUser').value.trim(), wm_opacity: S.wm_opacity, wm_pos: S.wm_pos});
+    startJob(r.id);
+  } catch (e) { toast(e.message); }
+};
 
-@app.middleware("http")
-async def gate(request: Request, call_next):
-    p = request.url.path
-    if ACCESS_KEY and p not in ("/login", "/health") and request.cookies.get("cf_key") != TOKEN:
-        if p.startswith(("/api", "/media")):
-            return JSONResponse({"detail": "No autorizado"}, 401)
-        return HTMLResponse(LOGIN, 401)
-    return await call_next(request)
+/* ---------- Vistas y polling ---------- */
+function show(v) { ['home', 'progress', 'gallery'].forEach(x => $('#' + x).classList.toggle('hidden', x !== v)); $('#homeBar').classList.toggle('hidden', v !== 'home'); window.scrollTo(0, 0); }
+function startJob(id) { st.job = id; localStorage.setItem('cf_job', id); show('progress'); poll(); }
+async function poll() {
+  clearTimeout(st.timer);
+  let j; try { j = await api('/api/jobs/' + st.job); } catch { localStorage.removeItem('cf_job'); return show('home'); }
+  $('#pMsg').textContent = j.message; $('#pBar').style.width = j.progress + '%'; $('#pPct').textContent = j.progress + '%';
+  if (j.clips.length) { renderGallery(j); if ($('#gallery').classList.contains('hidden')) show('gallery'); }
+  else if (j.status === 'error') { renderGallery(j); show('gallery'); }
+  const busy = !['done', 'error'].includes(j.status) || j.clips.some(c => ['queued', 'rendering'].includes(c.status));
+  if (busy) st.timer = setTimeout(poll, 1800);
+}
+$('#btnNew').onclick = () => { clearTimeout(st.timer); show('home'); };
 
+/* ---------- Galería ---------- */
+const keepPlaying = {};
+function renderGallery(j) {
+  st.cur = j;
+  const clips = j.clips.filter(c => !c.trashed);
+  $('#gTitle').textContent = j.status === 'done' ? `${clips.length} clips listos` : (j.status === 'error' ? 'Error' : j.message);
+  $('#gSub').textContent = j.status === 'done' ? 'Toca ▶ para ver con audio' : `${j.progress}%`;
+  const err = $('#gErr'); err.classList.toggle('hidden', j.status !== 'error'); err.textContent = '❌ ' + j.message;
+  const z = $('#btnZip'); z.classList.toggle('hidden', !clips.some(c => c.status === 'ready')); z.href = `/api/jobs/${j.id}/zip`;
+  const list = $('#list');
+  // re-render solo tarjetas cuyo estado/versión cambió (no interrumpe videos en reproducción)
+  clips.forEach(c => {
+    const key = `${c.status}|${c.ver}|${c.start}|${c.end}`;
+    let el = $(`#c-${c.id}`);
+    if (!el) { el = document.createElement('article'); el.id = `c-${c.id}`; list.appendChild(el); }
+    if (el.dataset.key !== key) { el.dataset.key = key; el.className = 'card'; el.innerHTML = cardHTML(c, j); bindCard(el, c, j); }
+  });
+  $$('#list > article').forEach(el => { if (!clips.some(c => `c-${c.id}` === el.id)) el.remove(); });
+}
+const fmt = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+function cardHTML(c, j) {
+  let media;
+  if (c.status === 'ready') media = `<video src="/media/${j.id}/${c.file}" poster="/media/${j.id}/${c.thumb}" controls playsinline loop preload="metadata" class="w-full max-h-[75vh] bg-black object-contain"></video>`;
+  else if (c.status === 'error') media = `<div class="h-48 flex items-center justify-center text-red-300 text-sm p-6 text-center">❌ ${esc(c.error)}</div>`;
+  else media = `<div class="h-72 flex items-center justify-center gap-3 text-zinc-400"><div class="spin"></div>${c.status === 'queued' ? 'En cola…' : 'Renderizando…'}</div>`;
+  const ready = c.status === 'ready', dis = ready ? '' : 'opacity-40 pointer-events-none';
+  return `<div class="relative bg-black">${media}<span class="absolute top-3 left-3 bg-black/70 backdrop-blur px-3 py-1 rounded-full text-sm font-bold">🔥 ${c.score}</span></div>
+  <div class="p-4">
+    <div class="font-bold leading-snug">${esc(c.title) || 'Clip #' + (c.idx + 1)}</div>
+    <div class="text-xs text-zinc-500 mt-1">${fmt(c.start)} → ${fmt(c.end)} · ${c.layout}</div>
+    <div class="text-xs text-yellow-300/80 mt-2 break-words">${esc(c.tags)}</div>
+    <div class="grid grid-cols-5 gap-2 mt-4 ${dis}">
+      <a class="btn btn-y !px-0 !min-h-[52px]" href="/api/jobs/${j.id}/clips/${c.id}/download" title="Descargar">⬇</a>
+      <button class="btn btn-g !px-0 !min-h-[52px]" data-a="mock" title="Vista previa móvil">📱</button>
+      <button class="btn btn-g !px-0 !min-h-[52px]" data-a="edit" title="Editar">✂️</button>
+      <button class="btn btn-g !px-0 !min-h-[52px]" data-a="reroll" title="Reroll">🎲</button>
+      <button class="btn btn-g !px-0 !min-h-[52px]" data-a="trash" title="Descartar">🗑</button>
+    </div>
+    ${ready ? `<button class="text-xs text-zinc-500 mt-3 underline" data-a="copy">Copiar título + hashtags</button>` : ''}
+  </div>`;
+}
+function bindCard(el, c, j) {
+  const run = {
+    mock: () => openMock(c, j), edit: () => openEditor(c, j),
+    reroll: async () => { try { await post(`/api/jobs/${j.id}/clips/${c.id}/reroll`); toast('Buscando otro momento…'); poll(); } catch (e) { toast(e.message); } },
+    trash: async () => { await post(`/api/jobs/${j.id}/clips/${c.id}/trash`); el.remove(); toast('Clip descartado'); poll(); },
+    copy: () => { navigator.clipboard?.writeText(c.desc); toast('Copiado'); },
+  };
+  $$('[data-a]', el).forEach(b => b.onclick = run[b.dataset.a]);
+  const v = $('video', el); if (v) v.addEventListener('play', () => $$('video').forEach(o => o !== v && o.pause()));
+}
 
-@app.on_event("startup")
-def startup():
-    cfg.ensure()
-    pl.load_jobs()
+/* ---------- Mockup de smartphone ---------- */
+function openMock(c, j) {
+  openSheet(`<div class="mx-auto w-[260px] rounded-[44px] border-[10px] border-zinc-800 bg-black relative overflow-hidden shadow-2xl" style="aspect-ratio:9/19">
+    <div class="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-5 bg-zinc-800 rounded-full z-10"></div>
+    <video src="/media/${j.id}/${c.file}" autoplay loop playsinline controls class="w-full h-full object-cover"></video>
+    <div class="absolute right-2 bottom-24 flex flex-col gap-4 text-xl text-center pointer-events-none"><div>❤️<div class="text-[10px]">12.4K</div></div><div>💬<div class="text-[10px]">318</div></div><div>↗️<div class="text-[10px]">Share</div></div></div>
+    <div class="absolute left-3 bottom-16 right-14 text-xs pointer-events-none drop-shadow"><b>@${esc((c.wm.user || 'tu_canal').replace('@', ''))}</b><div class="line-clamp-2">${esc(c.title)} <span class="text-sky-300">${esc(c.tags)}</span></div></div>
+  </div><button class="btn btn-g w-full mt-5" onclick="closeSheet()">Cerrar</button>`);
+}
 
+/* ---------- Editor manual ---------- */
+function openEditor(c, j) {
+  const dur = j.info?.duration || 0, wm = c.wm, auto = !c.crop;
+  openSheet(`<h2 class="text-xl font-extrabold">✂️ Editar clip</h2>
+  <div class="grid grid-cols-2 gap-3"><div><label class="lbl">Inicio (seg)</label><input id="eS" type="number" step="0.5" min="0" max="${dur}" class="inp" value="${c.start}"></div>
+  <div><label class="lbl">Fin (seg)</label><input id="eE" type="number" step="0.5" min="0" max="${dur}" class="inp" value="${c.end}"></div></div>
+  <div class="grid grid-cols-2 gap-2 mt-2"><button class="chip" id="nS">Inicio −1s</button><button class="chip" id="pS">Inicio +1s</button><button class="chip" id="nE">Fin −1s</button><button class="chip" id="pE">Fin +1s</button></div>
+  <label class="lbl">Layout</label><div class="grid grid-cols-2 gap-2" id="eL">${[['split', 'Split'], ['cam', 'Cámara sola'], ['podcast', 'Podcast'], ['original', 'Original']].map(x => `<button class="chip ${c.layout === x[0] ? 'on' : ''}" data-v="${x[0]}">${x[1]}</button>`).join('')}</div>
+  <label class="lbl">Reencuadre</label><label class="tgl">Automático (seguimiento de rostro) <input type="checkbox" id="eAuto" ${auto ? 'checked' : ''}></label>
+  <div id="eCrop" class="${auto ? 'hidden' : ''}"><label class="lbl">Centro horizontal</label><input type="range" id="eX" min="0" max="100" value="${c.crop?.x ?? 50}"><label class="lbl">Centro vertical</label><input type="range" id="eY" min="0" max="100" value="${c.crop?.y ?? 50}"></div>
+  <label class="lbl">Marca de agua</label><input id="eU" class="inp" value="${esc(wm.user)}" placeholder="usuario">
+  <input id="eO" type="range" min="0.1" max="1" step="0.05" value="${wm.opacity}">
+  <div class="grid grid-cols-4 gap-2" id="eP">${[['tl', '↖'], ['tr', '↗'], ['bl', '↙'], ['br', '↘']].map(x => `<button class="chip ${wm.pos === x[0] ? 'on' : ''}" data-v="${x[0]}">${x[1]}</button>`).join('')}</div>
+  <button id="eGo" class="btn btn-y w-full mt-6">Aplicar y re-renderizar</button>`, () => {
+    let lay = c.layout, pos = wm.pos;
+    const bindG = (g, set) => $$(`${g} .chip`).forEach(b => b.onclick = () => { set(b.dataset.v); $$(`${g} .chip`).forEach(x => x.classList.toggle('on', x === b)); });
+    bindG('#eL', v => lay = v); bindG('#eP', v => pos = v);
+    const bump = (id, d) => { const e = $(id); e.value = Math.max(0, +e.value + d); };
+    $('#nS').onclick = () => bump('#eS', -1); $('#pS').onclick = () => bump('#eS', 1);
+    $('#nE').onclick = () => bump('#eE', -1); $('#pE').onclick = () => bump('#eE', 1);
+    $('#eAuto').onchange = e => $('#eCrop').classList.toggle('hidden', e.target.checked);
+    $('#eGo').onclick = async () => {
+      try {
+        await post(`/api/jobs/${j.id}/clips/${c.id}/edit`, {
+          start: +$('#eS').value, end: +$('#eE').value, layout: lay,
+          crop: $('#eAuto').checked ? null : {x: +$('#eX').value, y: +$('#eY').value},
+          wm: {user: $('#eU').value, opacity: +$('#eO').value, pos}});
+        closeSheet(); toast('Re-renderizando…'); poll();
+      } catch (e) { toast(e.message); }
+    };
+  });
+}
 
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
-@app.get("/login")
-def login(key: str = ""):
-    if ACCESS_KEY and key == ACCESS_KEY:
-        r = RedirectResponse("/")
-        r.set_cookie("cf_key", TOKEN, max_age=31536000, httponly=True, samesite="lax")
-        return r
-    return HTMLResponse(LOGIN, 401)
-
-
-@app.get("/", response_class=HTMLResponse)
-def index():
-    f = BASE / "templates" / "index.html"
-    if not f.exists():
-        return HTMLResponse("<h3>Falta templates/index.html en el repositorio</h3>", 500)
-    return f.read_text(encoding="utf-8")
-
-
-@app.get("/api/settings")
-def get_settings():
-    return cfg.load()
-
-
-@app.post("/api/settings")
-def set_settings(d: dict):
-    return cfg.save(d)
-
-
-@app.post("/api/cleanup")
-def cleanup():
-    if pl.busy():
-        raise HTTPException(409, "Hay trabajos en proceso")
-    cfg.clear_cache()
-    return {"ok": True}
-
-
-@app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in (".mp4", ".mkv", ".mov", ".webm"):
-        raise HTTPException(400, "Formato no soportado (usa MP4 o MKV)")
-    fid = uuid.uuid4().hex[:10]
-    d = cfg.UPLOADS / fid
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / ("upload" + ext), "wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
-    return {"file_id": fid, "name": file.filename}
-
-
-class JobReq(BaseModel):
-    url: Optional[str] = None
-    file_id: Optional[str] = None
-    start_min: int = 0
-    duration: str = "30-60"
-    count: int = 10
-    layout: str = "split"
-    blur: bool = True
-    wm_user: str = ""
-    wm_opacity: float = 0.6
-    wm_pos: str = "br"
-    hook: bool = True
-    fillers: bool = True
-    stinger: bool = False
-    progress_bar: bool = True
-
-
-@app.post("/api/jobs")
-def create_job(r: JobReq):
-    if not r.url and not r.file_id:
-        raise HTTPException(400, "Pega una URL de Kick o sube un archivo")
-    if r.file_id and not (cfg.UPLOADS / Path(r.file_id).name).exists():
-        raise HTTPException(400, "Archivo no encontrado, súbelo de nuevo")
-    if r.duration not in pl.DUR or r.layout not in ("split", "cam", "podcast", "original"):
-        raise HTTPException(400, "Parámetros inválidos")
-    d = r.dict()
-    d["count"] = max(1, min(30, d["count"]))
-    d["file_id"] = Path(d["file_id"]).name if d["file_id"] else None
-    return {"id": pl.new_job(d)["id"]}
-
-
-def _job(jid):
-    j = pl.JOBS.get(jid)
-    if not j:
-        raise HTTPException(404, "Trabajo no encontrado")
-    return j
-
-
-def _clip(j, cid):
-    c = next((c for c in j["clips"] if c["id"] == cid), None)
-    if not c:
-        raise HTTPException(404, "Clip no encontrado")
-    return c
-
-
-@app.get("/api/jobs/{jid}")
-def get_job(jid: str):
-    return pl.public(_job(jid))
-
-
-@app.post("/api/jobs/{jid}/clips/{cid}/reroll")
-def reroll(jid: str, cid: str):
-    _job(jid), _clip(_job(jid), cid)
-    try:
-        pl.reroll(jid, cid)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"ok": True}
-
-
-@app.post("/api/jobs/{jid}/clips/{cid}/trash")
-def trash(jid: str, cid: str):
-    _clip(_job(jid), cid)
-    pl.trash(jid, cid)
-    return {"ok": True}
-
-
-@app.post("/api/jobs/{jid}/clips/{cid}/edit")
-def edit(jid: str, cid: str, d: dict):
-    _clip(_job(jid), cid)
-    try:
-        pl.edit(jid, cid, d)
-    except (ValueError, KeyError) as e:
-        raise HTTPException(400, str(e))
-    return {"ok": True}
-
-
-@app.get("/media/{jid}/{name}")
-def media(jid: str, name: str):
-    p = Path(_job(jid)["dir"]) / Path(name).name
-    if not p.exists():
-        raise HTTPException(404)
-    return FileResponse(p)  # Starlette soporta Range (necesario para <video> en iOS)
-
-
-@app.get("/api/jobs/{jid}/clips/{cid}/download")
-def download(jid: str, cid: str):
-    j = _job(jid)
-    c = _clip(j, cid)
-    p = Path(j["dir"]) / (c["file"] or "x")
-    if not p.exists():
-        raise HTTPException(404)
-    return FileResponse(p, media_type="video/mp4", filename=c["name"])
-
-
-@app.get("/api/jobs/{jid}/zip")
-def make_zip(jid: str):
-    j = _job(jid)
-    zp = Path(j["dir"]) / f"Clipper.fight_{jid}.zip"
-    meta = []
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as z:
-        for c in j["clips"]:
-            p = Path(j["dir"]) / (c["file"] or "x")
-            if c["trashed"] or not p.exists():
-                continue
-            z.write(p, f"Clipper.fight/{c['layout']}/{c['name']}")
-            meta.append(f"{c['name']}\n  Título: {c['title']}\n  Score: {c['score']}\n  {c['tags']}\n")
-        z.writestr("Clipper.fight/metadata.txt", "\n".join(meta) or "Sin clips")
-    return FileResponse(zp, media_type="application/zip", filename=zp.name)
-
-
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+/* ---------- Init ---------- */
+(async () => {
+  try { S = await api('/api/settings'); } catch { S = {}; }
+  applySettings(true);
+  const last = localStorage.getItem('cf_job');
+  if (last) startJob(last);
+})();
