@@ -12,6 +12,8 @@ from modules import config as cfg, pipeline as pl
 
 app = FastAPI(title="Clipper.fight")
 BASE = Path(__file__).parent
+(BASE / "static").mkdir(exist_ok=True)
+(BASE / "templates").mkdir(exist_ok=True)
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 TOKEN = hashlib.sha256(ACCESS_KEY.encode()).hexdigest() if ACCESS_KEY else ""
 LOGIN = """<meta name=viewport content="width=device-width,initial-scale=1"><body style="background:#000;color:#fff;
@@ -53,7 +55,10 @@ def login(key: str = ""):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (BASE / "templates" / "index.html").read_text(encoding="utf-8")
+    f = BASE / "templates" / "index.html"
+    if not f.exists():
+        return HTMLResponse("<h3>Falta templates/index.html en el repositorio</h3>", 500)
+    return f.read_text(encoding="utf-8")
 
 
 @app.get("/api/settings")
